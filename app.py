@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord import ui
 import re
 import random
 import os
@@ -11,6 +12,10 @@ import datetime
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
+# YÊU CẦU: discord.py >= 2.6 (đã test với 2.7.1) — bản cũ hơn KHÔNG có
+# discord.ui.LayoutView/Container/Section/TextDisplay/Separator/ActionRow.
+#   pip install -U discord.py
+#
 # BẢO MẬT TOKEN — xem .env.example / .gitignore đi kèm.
 # ---------------------------------------------------------------------------
 load_dotenv()
@@ -39,11 +44,11 @@ forbidden_abbreviations = {
     r'\bntn\b': "chứa từ viết tắt (ntn)",
 }
 
-# Màu sắc dùng chung cho toàn bộ Embed để giao diện nhất quán.
-COLOR_SUCCESS = discord.Color.from_rgb(87, 242, 135)
-COLOR_ERROR = discord.Color.from_rgb(237, 66, 69)
-COLOR_INFO = discord.Color.from_rgb(88, 101, 242)
-COLOR_GOLD = discord.Color.from_rgb(255, 199, 41)
+# accent_color của Container — thay thế cho discord.Color của Embed cũ.
+COLOR_SUCCESS = 0x57F287
+COLOR_ERROR = 0xED4245
+COLOR_INFO = 0x5865F2
+COLOR_GOLD = 0xFEE75C
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -144,7 +149,7 @@ conversation = ConversationManager(CONVERSATION_PATH)
 
 
 # ---------------------------------------------------------------------------
-# HÀM PHỤ TRỢ GIAO DIỆN
+# HÀM PHỤ TRỢ
 # ---------------------------------------------------------------------------
 def build_progress_bar(current: int, goal: int, length: int = PROGRESS_BAR_LENGTH) -> str:
     ratio = max(0.0, min(1.0, current / goal))
@@ -193,105 +198,17 @@ def load_topics():
 
 
 # ---------------------------------------------------------------------------
-# EMBED BUILDERS
+# ACTION ROW DÙNG CHUNG (buttons persistent — custom_id cố định, sống sót
+# qua restart nhờ bot.add_view() ở on_ready)
 # ---------------------------------------------------------------------------
-def build_hmd_embed(member: discord.Member | discord.User) -> discord.Embed:
-    tz = datetime.timezone(datetime.timedelta(hours=7))
-    ban_start = datetime.datetime(2026, 7, 10, 19, 45, 0, tzinfo=tz)
-    ban_end = ban_start + datetime.timedelta(days=7)
-
-    start_ts = int(ban_start.timestamp())
-    end_ts = int(ban_end.timestamp())
-    current_count = store.get(str(member.id))
-
-    embed = discord.Embed(
-        title="⏳ Contingency Contract — Tiến độ thi hành án",
-        color=COLOR_INFO,
-        description=f"Hồ sơ kỷ luật của {member.mention}",
+class ControlsActionRow(ui.ActionRow):
+    @ui.button(
+        label="Cố lên! Tôi sẽ làm được!",
+        style=discord.ButtonStyle.success,
+        emoji="💪",
+        custom_id="discipline_cheer_button",
     )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="📅 Bắt đầu", value=f"<t:{start_ts}:F>\n(<t:{start_ts}:R>)", inline=True)
-    embed.add_field(name="🔓 Được tự do", value=f"<t:{end_ts}:F>\n(<t:{end_ts}:R>)", inline=True)
-    embed.add_field(name="\u200b", value="\u200b", inline=False)
-    embed.add_field(
-        name=f"✍️ Tiến độ tin nhắn ({current_count}/{GOAL})",
-        value=build_progress_bar(current_count, GOAL),
-        inline=False,
-    )
-    embed.set_footer(text="Giữ vững kỷ luật. Sai một câu — reset về 0!")
-    return embed
-
-
-def build_success_embed(member: discord.Member | discord.User, current_count: int, reply_line: str) -> discord.Embed:
-    embed = discord.Embed(
-        title="✅ Chính xác!",
-        color=COLOR_SUCCESS,
-        description=f"> {reply_line}",
-    )
-    embed.add_field(
-        name=f"Tiến độ ({current_count}/{GOAL})",
-        value=build_progress_bar(current_count, GOAL),
-        inline=False,
-    )
-    embed.set_footer(text=f"{member.display_name} • Tiếp tục phát huy!")
-    return embed
-
-
-def build_mistake_embed(member: discord.Member | discord.User, reason: str, previous_count: int) -> discord.Embed:
-    embed = discord.Embed(
-        title="❌ Vi phạm quy tắc!",
-        color=COLOR_ERROR,
-        description=f"{member.mention} đã mắc lỗi: **{reason}**.",
-    )
-    embed.add_field(
-        name="Hậu quả",
-        value=f"Tiến độ đã bị **reset về 0** (trước đó: {previous_count}/{GOAL}).",
-        inline=False,
-    )
-    embed.add_field(
-        name="Ghi nhớ",
-        value="• Viết hoa chữ đầu\n• Có dấu tiếng Việt đầy đủ\n• Kết thúc bằng dấu chấm\n• Không viết tắt",
-        inline=False,
-    )
-    embed.set_footer(text="Đứng dậy và làm lại từ đầu. Kỷ luật là tự do.")
-    return embed
-
-
-def build_completion_embed(member: discord.Member | discord.User) -> discord.Embed:
-    embed = discord.Embed(
-        title="🎉 HOÀN THÀNH BẢN ÁN!",
-        color=COLOR_GOLD,
-        description=f"{member.mention} đã hoàn thành **{GOAL}/{GOAL}** tin nhắn chuẩn mực. Bạn đã được tự do!",
-    )
-    embed.add_field(name="Tiến độ cuối cùng", value=build_progress_bar(GOAL, GOAL), inline=False)
-    embed.set_footer(text="Chúc mừng! Đây là thành quả của sự kiên trì.")
-    return embed
-
-
-def build_topic_embed(member: discord.Member | discord.User, topic: str) -> discord.Embed:
-    embed = discord.Embed(
-        title="📝 Nhiệm vụ luyện viết mới",
-        color=COLOR_INFO,
-        description=f"> **{topic}**",
-    )
-    embed.add_field(
-        name="Quy tắc bắt buộc",
-        value="• Viết hoa chữ đầu\n• Có dấu tiếng Việt\n• Kết thúc bằng dấu chấm\n• Không viết tắt",
-        inline=False,
-    )
-    embed.set_footer(text=f"Giao cho {member.display_name} • Sai là reset về 0!")
-    return embed
-
-
-# ---------------------------------------------------------------------------
-# UI COMPONENTS
-# ---------------------------------------------------------------------------
-class BanStatusView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Cố lên! Tôi sẽ làm được!", style=discord.ButtonStyle.success, emoji="💪")
-    async def cheer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def cheer_button(self, interaction: discord.Interaction, button: ui.Button):
         try:
             await interaction.response.send_message(
                 "Chỉ còn một chút nữa thôi. Cứ kiên trì gõ từng dòng một nhé!",
@@ -300,23 +217,145 @@ class BanStatusView(discord.ui.View):
         except discord.HTTPException:
             logger.exception("Không thể phản hồi interaction (có thể đã hết hạn).")
 
-    @discord.ui.button(label="Xem quy tắc", style=discord.ButtonStyle.secondary, emoji="📋")
-    async def rules_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        rules_embed = discord.Embed(
-            title="📋 Quy tắc viết tin nhắn hợp lệ",
-            color=COLOR_INFO,
-            description=(
-                "1️⃣ Viết hoa chữ cái đầu câu\n"
-                "2️⃣ Có dấu tiếng Việt đầy đủ\n"
-                "3️⃣ Kết thúc bằng dấu chấm (.)\n"
-                "4️⃣ Không được viết tắt\n\n"
-                "⚠️ **Sai bất kỳ quy tắc nào → tiến độ reset về 0.**"
-            ),
-        )
+    @ui.button(
+        label="Xem quy tắc",
+        style=discord.ButtonStyle.secondary,
+        emoji="📋",
+        custom_id="discipline_rules_button",
+    )
+    async def rules_button(self, interaction: discord.Interaction, button: ui.Button):
         try:
-            await interaction.response.send_message(embed=rules_embed, ephemeral=True)
+            await interaction.response.send_message(view=build_rules_view(), ephemeral=True)
         except discord.HTTPException:
             logger.exception("Không thể phản hồi interaction (có thể đã hết hạn).")
+
+
+class PersistentControlsView(ui.LayoutView):
+    """View 'trơ' chỉ chứa ActionRow, đăng ký 1 lần lúc khởi động để các nút
+    trên những message cũ vẫn hoạt động sau khi bot restart."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(ControlsActionRow())
+
+
+# ---------------------------------------------------------------------------
+# COMPONENTS V2 VIEW BUILDERS (thay thế hoàn toàn cho Embed)
+# ---------------------------------------------------------------------------
+def build_hmd_view(member: discord.Member | discord.User) -> ui.LayoutView:
+    tz = datetime.timezone(datetime.timedelta(hours=7))
+    ban_start = datetime.datetime(2026, 7, 10, 19, 45, 0, tzinfo=tz)
+    ban_end = ban_start + datetime.timedelta(days=7)
+
+    start_ts = int(ban_start.timestamp())
+    end_ts = int(ban_end.timestamp())
+    current_count = store.get(str(member.id))
+
+    info_section = ui.Section(
+        ui.TextDisplay(f"📅 **Bắt đầu**\n<t:{start_ts}:F>\n(<t:{start_ts}:R>)"),
+        ui.TextDisplay(f"🔓 **Được tự do**\n<t:{end_ts}:F>\n(<t:{end_ts}:R>)"),
+        accessory=ui.Thumbnail(member.display_avatar.url),
+    )
+
+    container = ui.Container(
+        ui.TextDisplay(f"# ⏳ Contingency Contract\nHồ sơ kỷ luật của {member.mention}"),
+        ui.Separator(),
+        info_section,
+        ui.Separator(),
+        ui.TextDisplay(
+            f"**✍️ Tiến độ tin nhắn ({current_count}/{GOAL})**\n{build_progress_bar(current_count, GOAL)}"
+        ),
+        ControlsActionRow(),
+        ui.TextDisplay("-# Giữ vững kỷ luật. Sai một câu — reset về 0!"),
+        accent_color=COLOR_INFO,
+    )
+
+    view = ui.LayoutView(timeout=None)
+    view.add_item(container)
+    return view
+
+
+def build_success_view(member: discord.Member | discord.User, current_count: int, reply_line: str) -> ui.LayoutView:
+    container = ui.Container(
+        ui.TextDisplay(f"## ✅ Chính xác!\n> {reply_line}"),
+        ui.Separator(),
+        ui.TextDisplay(
+            f"**Tiến độ ({current_count}/{GOAL})**\n{build_progress_bar(current_count, GOAL)}"
+        ),
+        ui.TextDisplay(f"-# {member.display_name} • Tiếp tục phát huy!"),
+        accent_color=COLOR_SUCCESS,
+    )
+    view = ui.LayoutView()
+    view.add_item(container)
+    return view
+
+
+def build_mistake_view(member: discord.Member | discord.User, reason: str, previous_count: int) -> ui.LayoutView:
+    container = ui.Container(
+        ui.TextDisplay(f"## ❌ Vi phạm quy tắc!\n{member.mention} đã mắc lỗi: **{reason}**."),
+        ui.Separator(),
+        ui.TextDisplay(
+            f"**Hậu quả**\nTiến độ đã bị reset về 0 (trước đó: {previous_count}/{GOAL})."
+        ),
+        ui.TextDisplay(
+            "**Ghi nhớ**\n• Viết hoa chữ đầu\n• Có dấu tiếng Việt đầy đủ\n"
+            "• Kết thúc bằng dấu chấm\n• Không viết tắt"
+        ),
+        ui.TextDisplay("-# Đứng dậy và làm lại từ đầu. Kỷ luật là tự do."),
+        accent_color=COLOR_ERROR,
+    )
+    view = ui.LayoutView()
+    view.add_item(container)
+    return view
+
+
+def build_completion_view(member: discord.Member | discord.User) -> ui.LayoutView:
+    container = ui.Container(
+        ui.TextDisplay(
+            f"## 🎉 HOÀN THÀNH BẢN ÁN!\n{member.mention} đã hoàn thành **{GOAL}/{GOAL}** "
+            f"tin nhắn chuẩn mực. Bạn đã được tự do!"
+        ),
+        ui.Separator(),
+        ui.TextDisplay(f"**Tiến độ cuối cùng**\n{build_progress_bar(GOAL, GOAL)}"),
+        ui.TextDisplay("-# Chúc mừng! Đây là thành quả của sự kiên trì."),
+        accent_color=COLOR_GOLD,
+    )
+    view = ui.LayoutView()
+    view.add_item(container)
+    return view
+
+
+def build_topic_view(member: discord.Member | discord.User, topic: str) -> ui.LayoutView:
+    container = ui.Container(
+        ui.TextDisplay(f"## 📝 Nhiệm vụ luyện viết mới\n> **{topic}**"),
+        ui.Separator(),
+        ui.TextDisplay(
+            "**Quy tắc bắt buộc**\n• Viết hoa chữ đầu\n• Có dấu tiếng Việt\n"
+            "• Kết thúc bằng dấu chấm\n• Không viết tắt"
+        ),
+        ui.TextDisplay(f"-# Giao cho {member.display_name} • Sai là reset về 0!"),
+        accent_color=COLOR_INFO,
+    )
+    view = ui.LayoutView()
+    view.add_item(container)
+    return view
+
+
+def build_rules_view() -> ui.LayoutView:
+    container = ui.Container(
+        ui.TextDisplay(
+            "## 📋 Quy tắc viết tin nhắn hợp lệ\n"
+            "1️⃣ Viết hoa chữ cái đầu câu\n"
+            "2️⃣ Có dấu tiếng Việt đầy đủ\n"
+            "3️⃣ Kết thúc bằng dấu chấm (.)\n"
+            "4️⃣ Không được viết tắt\n\n"
+            "⚠️ **Sai bất kỳ quy tắc nào → tiến độ reset về 0.**"
+        ),
+        accent_color=COLOR_INFO,
+    )
+    view = ui.LayoutView()
+    view.add_item(container)
+    return view
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +396,12 @@ async def on_resumed():
 @bot.event
 async def on_ready():
     try:
+        bot.add_view(PersistentControlsView())
+        logger.info("Đã đăng ký persistent view cho các nút bấm.")
+    except Exception:
+        logger.exception("Lỗi khi đăng ký persistent view.")
+
+    try:
         synced = await bot.tree.sync()
         logger.info(f"Đã đồng bộ {len(synced)} slash command.")
     except discord.HTTPException:
@@ -387,18 +432,15 @@ async def on_message(message: discord.Message):
 
             if current_count < GOAL:
                 reply_line = conversation.get_line(current_count - 1)
-                embed = build_success_embed(message.author, current_count, reply_line)
-                await message.channel.send(embed=embed)
+                await message.channel.send(view=build_success_view(message.author, current_count, reply_line))
             else:
                 store.reset(user_id)
-                embed = build_completion_embed(message.author)
-                await message.channel.send(embed=embed)
+                await message.channel.send(view=build_completion_view(message.author))
         else:
             # Sai quy tắc -> reset tiến độ về 0 ngay lập tức.
             previous_count = store.get(user_id)
             store.reset(user_id)
-            embed = build_mistake_embed(message.author, reason, previous_count)
-            await message.channel.send(embed=embed)
+            await message.channel.send(view=build_mistake_view(message.author, reason, previous_count))
 
     except discord.Forbidden:
         logger.warning(f"Thiếu quyền gửi tin nhắn ở kênh {message.channel.id}")
@@ -413,17 +455,14 @@ async def on_message(message: discord.Message):
 # ---------------------------------------------------------------------------
 @bot.hybrid_command(name="hmd", aliases=["howmanydayspassed"], description="Xem tiến độ án phạt Contingency Contract")
 async def hmd(ctx: commands.Context):
-    embed = build_hmd_embed(ctx.author)
-    view = BanStatusView()
-    await ctx.send(embed=embed, view=view)
+    await ctx.send(view=build_hmd_view(ctx.author))
 
 
 @bot.hybrid_command(name="chude", description="Nhận một chủ đề luyện viết ngẫu nhiên")
 async def chude(ctx: commands.Context):
     topics = load_topics()
     selected_topic = random.choice(topics)
-    embed = build_topic_embed(ctx.author, selected_topic)
-    await ctx.send(embed=embed)
+    await ctx.send(view=build_topic_view(ctx.author, selected_topic))
 
 
 # ---------------------------------------------------------------------------

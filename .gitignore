@@ -1,0 +1,6 @@
+# Bỏ qua file chứa biến môi trường
+.env
+
+# Bỏ qua các file cache của Python
+__pycache__/
+*.pyc

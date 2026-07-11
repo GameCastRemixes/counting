@@ -11,17 +11,8 @@ import datetime
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
-# 1) BẢO MẬT TOKEN
+# BẢO MẬT TOKEN — xem .env.example / .gitignore đi kèm.
 # ---------------------------------------------------------------------------
-# - Token KHÔNG bao giờ được hardcode trong file .py.
-# - load_dotenv() đọc file ".env" (chỉ tồn tại trên máy/máy chủ của bạn).
-# - File ".env" PHẢI được liệt kê trong ".gitignore" để không bao giờ bị
-#   commit/push lên GitHub. Repo này đi kèm ".gitignore" và ".env.example"
-#   (xem 2 file được tạo cùng bot.py) — hãy copy ".env.example" thành ".env"
-#   rồi điền token thật vào đó, không commit file ".env".
-# - Nếu token từng bị lộ trên GitHub (kể cả trong lịch sử commit cũ), phải
-#   vào Discord Developer Portal > Bot > Reset Token ngay lập tức, vì token
-#   cũ coi như đã bị xâm phạm dù bạn xoá khỏi code.
 load_dotenv()
 
 logging.basicConfig(
@@ -33,11 +24,26 @@ logger = logging.getLogger("discipline_bot")
 DB_PATH = "progress.db"
 CONVERSATION_PATH = "conversation.txt"
 GOAL = 3500
+PROGRESS_BAR_LENGTH = 20
 
-forbidden_abbreviations = [
-    r'\bko\b', r'\bk\b', r'\bdc\b', r'\bđc\b', r'\br\b',
-    r'\bvs\b', r'\bms\b', r'\bh\b', r'\bđx\b', r'\bntn\b'
-]
+forbidden_abbreviations = {
+    r'\bko\b': "chứa từ viết tắt (ko)",
+    r'\bk\b': "chứa từ viết tắt (k)",
+    r'\bdc\b': "chứa từ viết tắt (dc)",
+    r'\bđc\b': "chứa từ viết tắt (đc)",
+    r'\br\b': "chứa từ viết tắt (r)",
+    r'\bvs\b': "chứa từ viết tắt (vs)",
+    r'\bms\b': "chứa từ viết tắt (ms)",
+    r'\bh\b': "chứa từ viết tắt (h)",
+    r'\bđx\b': "chứa từ viết tắt (đx)",
+    r'\bntn\b': "chứa từ viết tắt (ntn)",
+}
+
+# Màu sắc dùng chung cho toàn bộ Embed để giao diện nhất quán.
+COLOR_SUCCESS = discord.Color.from_rgb(87, 242, 135)
+COLOR_ERROR = discord.Color.from_rgb(237, 66, 69)
+COLOR_INFO = discord.Color.from_rgb(88, 101, 242)
+COLOR_GOLD = discord.Color.from_rgb(255, 199, 41)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -46,7 +52,7 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 # ---------------------------------------------------------------------------
-# 2) LƯU TRỮ TIẾN ĐỘ (SQLite + cache RAM, tự lưu/đọc, không mất khi restart)
+# LƯU TRỮ TIẾN ĐỘ (SQLite + cache RAM)
 # ---------------------------------------------------------------------------
 class ProgressStore:
     def __init__(self, db_path: str):
@@ -84,8 +90,6 @@ class ProgressStore:
         self._persist(user_id, 0)
 
     def _persist(self, user_id: str, count: int):
-        # Lỗi ghi DB (ví dụ hết dung lượng ổ đĩa) không được phép làm crash
-        # bot — cache RAM vẫn đúng, chỉ log lỗi và thử lại ở lần ghi kế tiếp.
         try:
             self.conn.execute(
                 """
@@ -103,15 +107,9 @@ store = ProgressStore(DB_PATH)
 
 
 # ---------------------------------------------------------------------------
-# 3) QUẢN LÝ CONVERSATION.TXT — AN TOÀN INDEX, KHÔNG BAO GIỜ IndexError
+# QUẢN LÝ CONVERSATION.TXT — an toàn index (modulo), không bao giờ crash
 # ---------------------------------------------------------------------------
 class ConversationManager:
-    """
-    Nạp danh sách câu đối thoại từ conversation.txt.
-    Dùng index theo kiểu 'quay vòng' (modulo) nên dù tiến độ người dùng vượt
-    quá 350 câu (hoặc file chỉ có 1 dòng, hoặc file rỗng/không tồn tại),
-    get_line() KHÔNG BAO GIỜ raise IndexError.
-    """
     DEFAULT_LINE = "Tốt lắm, tiếp tục duy trì kỷ luật nhé."
 
     def __init__(self, path: str):
@@ -135,8 +133,6 @@ class ConversationManager:
             self.lines = [self.DEFAULT_LINE]
 
     def get_line(self, index: int) -> str:
-        # index % len(self.lines) luôn nằm trong khoảng [0, len-1] vì
-        # len(self.lines) >= 1 luôn đúng (đảm bảo ở reload()).
         safe_index = index % len(self.lines)
         return self.lines[safe_index]
 
@@ -145,6 +141,146 @@ class ConversationManager:
 
 
 conversation = ConversationManager(CONVERSATION_PATH)
+
+
+# ---------------------------------------------------------------------------
+# HÀM PHỤ TRỢ GIAO DIỆN
+# ---------------------------------------------------------------------------
+def build_progress_bar(current: int, goal: int, length: int = PROGRESS_BAR_LENGTH) -> str:
+    ratio = max(0.0, min(1.0, current / goal))
+    filled = round(ratio * length)
+    bar = "█" * filled + "░" * (length - filled)
+    return f"`{bar}` **{ratio * 100:.1f}%**"
+
+
+def get_violation_reason(text: str) -> str | None:
+    """Trả về lý do vi phạm (tiếng Việt) hoặc None nếu tin nhắn hợp lệ."""
+    if not text or not text.strip():
+        return "tin nhắn trống"
+
+    stripped = text.strip()
+    if not stripped[0].isupper():
+        return "chưa viết hoa chữ cái đầu câu"
+    if not stripped.endswith('.'):
+        return "chưa kết thúc bằng dấu chấm (.)"
+
+    vietnamese_chars = "àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ"
+    if not any(c in vietnamese_chars for c in stripped.lower()):
+        return "không có dấu tiếng Việt"
+
+    text_lower = stripped.lower()
+    for pattern, reason in forbidden_abbreviations.items():
+        if re.search(pattern, text_lower):
+            return reason
+
+    return None
+
+
+def check_message_rules(text: str) -> bool:
+    return get_violation_reason(text) is None
+
+
+def load_topics():
+    try:
+        if os.path.exists("topics.txt"):
+            with open("topics.txt", "r", encoding="utf-8") as f:
+                topics = [line.strip() for line in f if line.strip()]
+                if topics:
+                    return topics
+    except OSError:
+        logger.exception("Lỗi khi đọc topics.txt")
+    return ["Hãy viết một đoạn văn ngắn miêu tả cảm xúc của bạn lúc này."]
+
+
+# ---------------------------------------------------------------------------
+# EMBED BUILDERS
+# ---------------------------------------------------------------------------
+def build_hmd_embed(member: discord.Member | discord.User) -> discord.Embed:
+    tz = datetime.timezone(datetime.timedelta(hours=7))
+    ban_start = datetime.datetime(2026, 7, 10, 19, 45, 0, tzinfo=tz)
+    ban_end = ban_start + datetime.timedelta(days=7)
+
+    start_ts = int(ban_start.timestamp())
+    end_ts = int(ban_end.timestamp())
+    current_count = store.get(str(member.id))
+
+    embed = discord.Embed(
+        title="⏳ Contingency Contract — Tiến độ thi hành án",
+        color=COLOR_INFO,
+        description=f"Hồ sơ kỷ luật của {member.mention}",
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="📅 Bắt đầu", value=f"<t:{start_ts}:F>\n(<t:{start_ts}:R>)", inline=True)
+    embed.add_field(name="🔓 Được tự do", value=f"<t:{end_ts}:F>\n(<t:{end_ts}:R>)", inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=False)
+    embed.add_field(
+        name=f"✍️ Tiến độ tin nhắn ({current_count}/{GOAL})",
+        value=build_progress_bar(current_count, GOAL),
+        inline=False,
+    )
+    embed.set_footer(text="Giữ vững kỷ luật. Sai một câu — reset về 0!")
+    return embed
+
+
+def build_success_embed(member: discord.Member | discord.User, current_count: int, reply_line: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="✅ Chính xác!",
+        color=COLOR_SUCCESS,
+        description=f"> {reply_line}",
+    )
+    embed.add_field(
+        name=f"Tiến độ ({current_count}/{GOAL})",
+        value=build_progress_bar(current_count, GOAL),
+        inline=False,
+    )
+    embed.set_footer(text=f"{member.display_name} • Tiếp tục phát huy!")
+    return embed
+
+
+def build_mistake_embed(member: discord.Member | discord.User, reason: str, previous_count: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="❌ Vi phạm quy tắc!",
+        color=COLOR_ERROR,
+        description=f"{member.mention} đã mắc lỗi: **{reason}**.",
+    )
+    embed.add_field(
+        name="Hậu quả",
+        value=f"Tiến độ đã bị **reset về 0** (trước đó: {previous_count}/{GOAL}).",
+        inline=False,
+    )
+    embed.add_field(
+        name="Ghi nhớ",
+        value="• Viết hoa chữ đầu\n• Có dấu tiếng Việt đầy đủ\n• Kết thúc bằng dấu chấm\n• Không viết tắt",
+        inline=False,
+    )
+    embed.set_footer(text="Đứng dậy và làm lại từ đầu. Kỷ luật là tự do.")
+    return embed
+
+
+def build_completion_embed(member: discord.Member | discord.User) -> discord.Embed:
+    embed = discord.Embed(
+        title="🎉 HOÀN THÀNH BẢN ÁN!",
+        color=COLOR_GOLD,
+        description=f"{member.mention} đã hoàn thành **{GOAL}/{GOAL}** tin nhắn chuẩn mực. Bạn đã được tự do!",
+    )
+    embed.add_field(name="Tiến độ cuối cùng", value=build_progress_bar(GOAL, GOAL), inline=False)
+    embed.set_footer(text="Chúc mừng! Đây là thành quả của sự kiên trì.")
+    return embed
+
+
+def build_topic_embed(member: discord.Member | discord.User, topic: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="📝 Nhiệm vụ luyện viết mới",
+        color=COLOR_INFO,
+        description=f"> **{topic}**",
+    )
+    embed.add_field(
+        name="Quy tắc bắt buộc",
+        value="• Viết hoa chữ đầu\n• Có dấu tiếng Việt\n• Kết thúc bằng dấu chấm\n• Không viết tắt",
+        inline=False,
+    )
+    embed.set_footer(text=f"Giao cho {member.display_name} • Sai là reset về 0!")
+    return embed
 
 
 # ---------------------------------------------------------------------------
@@ -164,79 +300,37 @@ class BanStatusView(discord.ui.View):
         except discord.HTTPException:
             logger.exception("Không thể phản hồi interaction (có thể đã hết hạn).")
 
-
-# ---------------------------------------------------------------------------
-# HÀM PHỤ TRỢ
-# ---------------------------------------------------------------------------
-def load_topics():
-    try:
-        if os.path.exists("topics.txt"):
-            with open("topics.txt", "r", encoding="utf-8") as f:
-                topics = [line.strip() for line in f if line.strip()]
-                if topics:
-                    return topics
-    except OSError:
-        logger.exception("Lỗi khi đọc topics.txt")
-    return ["Hãy viết một đoạn văn ngắn miêu tả cảm xúc của bạn lúc này."]
-
-
-def check_message_rules(text: str) -> bool:
-    if not text:
-        return False
-    text = text.strip()
-    if not text or not text[0].isupper():
-        return False
-    if not text.endswith('.'):
-        return False
-
-    vietnamese_chars = "àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ"
-    if not any(c in vietnamese_chars for c in text.lower()):
-        return False
-
-    text_lower = text.lower()
-    for abbr in forbidden_abbreviations:
-        if re.search(abbr, text_lower):
-            return False
-    return True
-
-
-def build_hmd_embed(member: discord.Member | discord.User) -> discord.Embed:
-    tz = datetime.timezone(datetime.timedelta(hours=7))
-    ban_start = datetime.datetime(2026, 7, 10, 19, 45, 0, tzinfo=tz)
-    ban_end = ban_start + datetime.timedelta(days=7)
-
-    start_ts = int(ban_start.timestamp())
-    end_ts = int(ban_end.timestamp())
-
-    embed = discord.Embed(
-        title="⏳ Tiến độ Contingency Contract",
-        color=discord.Color.brand_red(),
-        description=f"Dữ liệu án phạt của {member.mention}",
-    )
-    embed.add_field(name="Bắt đầu từ:", value=f"<t:{start_ts}:F>\n(<t:{start_ts}:R>)", inline=False)
-    embed.add_field(name="Được tự do vào:", value=f"<t:{end_ts}:F>\n(<t:{end_ts}:R>)", inline=False)
-
-    current_count = store.get(str(member.id))
-    embed.add_field(name="Tiến độ tin nhắn:", value=f"**{current_count} / {GOAL}** tin nhắn chuẩn mực.", inline=False)
-    embed.set_footer(text="Giữ vững kỷ luật. Không được viết tắt!")
-    return embed
+    @discord.ui.button(label="Xem quy tắc", style=discord.ButtonStyle.secondary, emoji="📋")
+    async def rules_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rules_embed = discord.Embed(
+            title="📋 Quy tắc viết tin nhắn hợp lệ",
+            color=COLOR_INFO,
+            description=(
+                "1️⃣ Viết hoa chữ cái đầu câu\n"
+                "2️⃣ Có dấu tiếng Việt đầy đủ\n"
+                "3️⃣ Kết thúc bằng dấu chấm (.)\n"
+                "4️⃣ Không được viết tắt\n\n"
+                "⚠️ **Sai bất kỳ quy tắc nào → tiến độ reset về 0.**"
+            ),
+        )
+        try:
+            await interaction.response.send_message(embed=rules_embed, ephemeral=True)
+        except discord.HTTPException:
+            logger.exception("Không thể phản hồi interaction (có thể đã hết hạn).")
 
 
 # ---------------------------------------------------------------------------
-# 4) XỬ LÝ LỖI TOÀN CỤC — bot không crash vì tin nhắn lạ / mất kết nối
+# XỬ LÝ LỖI TOÀN CỤC
 # ---------------------------------------------------------------------------
 @bot.event
 async def on_error(event_method, *args, **kwargs):
-    # Bắt mọi exception không lường trước xảy ra trong bất kỳ event handler
-    # nào (on_message, on_ready, ...). Không làm gì hơn ngoài log, để
-    # discord.py tự tiếp tục vòng lặp sự kiện thay vì crash toàn bộ tiến trình.
     logger.error(f"Lỗi không lường trước tại '{event_method}':\n{traceback.format_exc()}")
 
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     if isinstance(error, commands.CommandNotFound):
-        return  # bỏ qua lệnh không tồn tại, giống hành vi gốc
+        return
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.send(f"Từ từ đã! Thử lại sau {error.retry_after:.1f}s.")
         return
@@ -249,8 +343,6 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 
 @bot.event
 async def on_disconnect():
-    # discord.py tự động reconnect (reconnect=True mặc định khi gọi bot.run),
-    # đây chỉ là log để bạn theo dõi tình trạng mạng/uptime.
     logger.warning("Bot mất kết nối tới Discord, đang chờ tự động kết nối lại...")
 
 
@@ -284,36 +376,35 @@ async def on_message(message: discord.Message):
             return
 
         if message.content.startswith('!'):
-            return  # lệnh không xác định, bỏ qua như hành vi gốc
+            return
 
         text = message.content
         user_id = str(message.author.id)
+        reason = get_violation_reason(text)
 
-        if check_message_rules(text):
+        if reason is None:
             current_count = store.increment(user_id)
 
             if current_count < GOAL:
-                # Câu đối thoại lấy theo modulo -> an toàn dù vượt quá số
-                # dòng có trong conversation.txt (kể cả sau câu thứ 350).
                 reply_line = conversation.get_line(current_count - 1)
-                await message.channel.send(
-                    f"Chính xác! Tiến độ: {current_count}/{GOAL}.\n> {reply_line}"
-                )
+                embed = build_success_embed(message.author, current_count, reply_line)
+                await message.channel.send(embed=embed)
             else:
-                await message.channel.send(
-                    f"🎉 CHÚC MỪNG {message.author.mention}! Bạn đã hoàn thành {GOAL}/{GOAL} tin nhắn. Bạn đã được tự do!"
-                )
                 store.reset(user_id)
+                embed = build_completion_embed(message.author)
+                await message.channel.send(embed=embed)
         else:
-            await message.channel.send(f"{message.author.mention} bạn đã sai! Hãy làm lại và tiếp tục tập luyện.")
+            # Sai quy tắc -> reset tiến độ về 0 ngay lập tức.
+            previous_count = store.get(user_id)
+            store.reset(user_id)
+            embed = build_mistake_embed(message.author, reason, previous_count)
+            await message.channel.send(embed=embed)
 
     except discord.Forbidden:
         logger.warning(f"Thiếu quyền gửi tin nhắn ở kênh {message.channel.id}")
     except discord.HTTPException:
         logger.exception("Lỗi HTTP khi gửi tin nhắn tới Discord.")
     except Exception:
-        # Lưới an toàn cuối cùng: bất kỳ lỗi bất ngờ nào khác (tin nhắn dị
-        # dạng, unicode lạ, v.v...) chỉ được log lại, KHÔNG làm crash bot.
         logger.error(f"Lỗi không lường trước khi xử lý tin nhắn:\n{traceback.format_exc()}")
 
 
@@ -331,11 +422,8 @@ async def hmd(ctx: commands.Context):
 async def chude(ctx: commands.Context):
     topics = load_topics()
     selected_topic = random.choice(topics)
-    await ctx.send(
-        f"Bắt đầu nhiệm vụ, {ctx.author.mention}! Chủ đề của bạn là:\n"
-        f"> **{selected_topic}**\n\n"
-        f"*Nhớ: Viết hoa chữ đầu, có dấu đầy đủ, kết thúc bằng dấu chấm và tuyệt đối không viết tắt.*"
-    )
+    embed = build_topic_embed(ctx.author, selected_topic)
+    await ctx.send(embed=embed)
 
 
 # ---------------------------------------------------------------------------
